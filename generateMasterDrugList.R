@@ -54,12 +54,12 @@ for (i in 1:nrow(allDrugs)){
       oral <- ifelse(oral =="", FALSE, TRUE)%>%paste(collapse="; ")
       class <- data%>%html_node("usan_stem_definition")%>%html_text()%>%paste(collapse="; ")
       ro5Violations <- data%>%html_node("num_ro5_violations")%>%html_text()
-      ro5 <- ifelse(ro5Violations == "", TRUE, FALSE)%>%paste(collapse="; ")
+      # ro5 <- ifelse(ro5Violations == "", TRUE, FALSE)%>%paste(collapse="; ")
       ro3_pass <- data %>%html_node("ro3_pass")%>%html_text()
       ro3 <- ifelse(ro3_pass == "Y", TRUE, FALSE)%>%paste(collapse="; ")
       max_phase <- data %>% html_node("max_phase")%>%html_text()%>%paste(collapse="; ")
       availability_type <- data %>%html_node("availability_type")%>%html_text()
-      df<- data.frame(row, name, chemblIDs, synonyms, SMILES, mol_formula, mol_weight, mol_type, natural_product, class, ro5, ro3, max_phase, availability_type, oral)
+      df<- data.frame(row, name, chemblIDs, synonyms, SMILES, mol_formula, mol_weight, mol_type, natural_product, class, ro5Violations, ro3, max_phase, availability_type, oral)
       
     }
     
@@ -96,10 +96,42 @@ B3DB_data <- B3DB%>%select(compound_name, `BBB+/BBB-`)
 B3DBRegexData <- right_join(B3DB_data, B3DBRegex, by = "compound_name", relationship = "many-to-many") %>%select(Name, compound_name, B3DB = `BBB+/BBB-`)
 
 allDrugsB3DB_BBB <- left_join(allDrugs1, B3DBRegexData, by="Name", relationship = "many-to-many")
+
 allDrugsBBB <- allDrugsB3DB_BBB%>%
   group_by(row)%>%
-  summarise(BBB = ifelse(length(unique(B3DB)) == 1, first(B3DB), "unclear"))
+  summarise(BBB1 = ifelse(length(unique(B3DB)) == 1, first(B3DB), "BBB+"))
+
+
 allDrugs <- left_join(allDrugs, allDrugsBBB, by = "row")
+
+allDrugs <- allDrugs %>% 
+  mutate(BBB1 = case_match(BBB1, 
+                                    "BBB+" ~ TRUE,
+                                    "BBB-" ~ FALSE
+                                    ))
+
+
+#get admetsar data from previous
+ican_mnd_druglist <- read.csv("data/2024-03-13ICAN-MNDallDrugsList.csv")
+admetSarBBB <- ican_mnd_druglist%>%select(Name, 
+                                          admetSAR_BBB = CNSPenetrance, 
+                                          admetSAR_p_CNSPenetrance = p_CNSPenetrance)
+allDrugs <- left_join(allDrugs, admetSarBBB, by = "Name", relationship = "many-to-many")
+naBBB <- allDrugs %>% filter(is.na(BBB1) & is.na(admetSAR_BBB))
+
+#combine both sources, if discrepancy, bring forward BBB=TRUE leaning towards being overinclusive
+allDrugs1 <- allDrugs%>%
+  filter(!row %in% naBBB$row) %>%
+  mutate(BBB = ifelse(
+    is.na(BBB1), admetSAR_BBB, ifelse(
+      is.na(admetSAR_BBB), BBB1, ifelse(   
+        BBB1 == "BBB+"|BBB1=="unclear"|admetSAR_BBB == TRUE, TRUE, FALSE)
+    ))
+  )%>%
+  select(row, BBB)%>%
+  unique()
+
+allDrugs <- left_join(allDrugs, allDrugs1, by = "row")
 
 #get BNF Snomed data-----
 #from NHS business authority: https://www.nhsbsa.nhs.uk/prescription-data/understanding-our-data/bnf-snomed-mapping
@@ -142,4 +174,6 @@ allDrugs <- allDrugs %>%
          BNFgeneric = ifelse(Name %in% filter(bnfDrugs, generic == TRUE)$Drug, TRUE, FALSE))
 
 # write output----
-write.csv(allDrugs, paste0("output/", Sys.Date(), "masterDrugList.csv"))
+write.csv(allDrugs, paste0("output/", 
+                           Sys.Date(),
+                           "masterDrugList.csv"), row.names = FALSE)
