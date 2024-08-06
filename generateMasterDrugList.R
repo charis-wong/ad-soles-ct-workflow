@@ -13,7 +13,7 @@ library(stringr)
 library(tibble)
 library(tidyr)
 library(xml2)
-
+source("configure.R")
 drugBankDictionary <- read_sheet(Sys.getenv("relisyr_ad_gsheet"), "drugDictionary")
 drugBankVocabulary <- read.csv("data/drugbank vocabulary.csv")
 allDrugs <- left_join(drugBankDictionary, drugBankVocabulary, by=c("Name" = "Common.name"))
@@ -105,33 +105,74 @@ allDrugsBBB <- allDrugsB3DB_BBB%>%
 allDrugs <- left_join(allDrugs, allDrugsBBB, by = "row")
 
 allDrugs <- allDrugs %>% 
-  mutate(BBB1 = case_match(BBB1, 
+  mutate(BBB1 = case_match(B3DB_BBB, 
                                     "BBB+" ~ TRUE,
                                     "BBB-" ~ FALSE
                                     ))
 
 
-#get admetsar data from previous
-ican_mnd_druglist <- read.csv("data/2024-03-13ICAN-MNDallDrugsList.csv")
-admetSarBBB <- ican_mnd_druglist%>%select(Name, 
-                                          admetSAR_BBB = CNSPenetrance, 
-                                          admetSAR_p_CNSPenetrance = p_CNSPenetrance)
-allDrugs <- left_join(allDrugs, admetSarBBB, by = "Name", relationship = "many-to-many")
-naBBB <- allDrugs %>% filter(is.na(BBB1) & is.na(admetSAR_BBB))
+# #get admetsar data from previous - superseded by getAdmetSAR3Data
+# ican_mnd_druglist <- read.csv("data/2024-03-13ICAN-MNDallDrugsList.csv")
+# admetSarBBB <- ican_mnd_druglist%>%select(Name, 
+#                                           admetSAR_BBB = CNSPenetrance, 
+#                                           admetSAR_p_CNSPenetrance = p_CNSPenetrance)
+# allDrugs <- left_join(allDrugs, admetSarBBB, by = "Name", relationship = "many-to-many")
+# naBBB <- allDrugs %>% filter(is.na(BBB1) & is.na(admetSAR_BBB))
+# 
+# #combine both sources, if discrepancy, bring forward BBB=TRUE leaning towards being overinclusive
+# allDrugs1 <- allDrugs%>%
+#   filter(!row %in% naBBB$row) %>%
+#   mutate(BBB = ifelse(
+#     is.na(BBB1), admetSAR_BBB, ifelse(
+#       is.na(admetSAR_BBB), BBB1, ifelse(   
+#         BBB1 == "BBB+"|BBB1=="unclear"|admetSAR_BBB == TRUE, TRUE, FALSE)
+#     ))
+#   )%>%
+#   select(row, BBB)%>%
+#   unique()
+# 
+# allDrugs <- left_join(allDrugs, allDrugs1, by = "row")
 
-#combine both sources, if discrepancy, bring forward BBB=TRUE leaning towards being overinclusive
+
+
+# getadmetSAR data----
+
+allDrugs <- allDrugs %>% 
+  unique()
+
+admetData <- read.csv("data/admetSAR3Predictions.csv")%>%
+  select(SMILES, MW, HBA, HBD, SlogP, admetSAR3_BBB = BBB)%>%unique()%>%
+  mutate(ro5_MW = ifelse(MW<500, 0, 1),
+         ro5_HBA = ifelse(HBA<10, 0, 1), 
+         ro5_HBD = ifelse(HBD<5, 0, 1),
+         ro5_logP = ifelse(SlogP<5, 0, 1))
+
+admetData <- admetData%>%
+  mutate(across(starts_with('ro5'), as.numeric))%>%
+  mutate(admetSAR_ro5Violations = ro5_MW+ro5_HBA + ro5_HBD+ ro5_logP)
+
+allDrugs<- left_join(allDrugs, admetData, by = "SMILES")%>%unique()
+
+
+naBBB <- allDrugs %>% filter(is.na(B3DB_BBB) & is.na(admetSAR3_BBB))
+
+# #combine both sources, if discrepancy, bring forward BBB=TRUE leaning towards being overinclusive
 allDrugs1 <- allDrugs%>%
   filter(!row %in% naBBB$row) %>%
   mutate(BBB = ifelse(
-    is.na(BBB1), admetSAR_BBB, ifelse(
-      is.na(admetSAR_BBB), BBB1, ifelse(   
-        BBB1 == "BBB+"|BBB1=="unclear"|admetSAR_BBB == TRUE, TRUE, FALSE)
+    is.na(B3DB_BBB), 
+    ifelse(admetSAR3_BBB>0.5, TRUE, FALSE),
+    ifelse(
+      is.na(admetSAR3_BBB), 
+      B3DB_BBB, 
+      ifelse(B3DB_BBB == TRUE |admetSAR3_BBB>0.5, TRUE, FALSE)
     ))
   )%>%
   select(row, BBB)%>%
   unique()
 
 allDrugs <- left_join(allDrugs, allDrugs1, by = "row")
+
 
 #get BNF Snomed data-----
 #from NHS business authority: https://www.nhsbsa.nhs.uk/prescription-data/understanding-our-data/bnf-snomed-mapping
@@ -172,6 +213,8 @@ bnfDrugs<- left_join(bnfDrugs, select(BNFRegex, c(Name, Drug)), by = c("vtm_nm" 
 allDrugs <- allDrugs %>%
   mutate(BNF = ifelse(Name %in% bnfDrugs$Drug, TRUE, FALSE),
          BNFgeneric = ifelse(Name %in% filter(bnfDrugs, generic == TRUE)$Drug, TRUE, FALSE))
+
+allDrugs <- allDrugs%>%unique()
 
 # write output----
 write.csv(allDrugs, paste0("output/", 
